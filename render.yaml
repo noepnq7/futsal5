@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: futsal-5
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: node dist/server.js

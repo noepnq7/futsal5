@@ -108,6 +108,7 @@ export function join(game: any, opts: { name: string; room: string }): Promise<R
         haveLocal = true;
         const m = state.people.get(entity);
         if (m) Object.assign(m, local);
+        emit("own", { ...local });
       } else if (msg.t === "pong") {
         room.ping = Math.round(performance.now() - msg.ts);
       } else if (msg.t === "ev") {

@@ -15,6 +15,9 @@ export const Game = schema({
   /** 0 antes de empezar, 1 primer tiempo, 2 segundo tiempo. */
   half: t.u8,
   red: t.u8,
+  /** Equipo elegido de cada lado (índice en TEAMS). */
+  kitRed: t.u8,
+  kitBlue: t.u8,
   blue: t.u8,
   /** Faltas acumuladas de cada equipo en el tiempo actual. */
   foulsRed: t.u8,
@@ -39,6 +42,29 @@ export const game = defineGame({
     people: { fields: ["x", "z", "yaw"], maxSpeed: 14 },
   },
 });
+
+/** Equipos para elegir: camiseta, short y arquero. Los dos primeros son los de siempre. */
+export const TEAMS = [
+  { name: "Rojo", c: "#ff5a36", d: "#a8290f", gk: "#f2c230" },
+  { name: "Azul", c: "#25c5ff", d: "#0c6f9c", gk: "#7ee081" },
+  { name: "Argentina", c: "#74c3f2", d: "#17274d", gk: "#f26b3a" },
+  { name: "Brasil", c: "#f7d417", d: "#1d4fa8", gk: "#2b2b36" },
+  { name: "Uruguay", c: "#4f9be0", d: "#15151c", gk: "#e8e8ee" },
+  { name: "México", c: "#1f9a52", d: "#f2f2f2", gk: "#ff7ac2" },
+  { name: "España", c: "#d9302c", d: "#1c2b6e", gk: "#9ad14b" },
+  { name: "Francia", c: "#233f9e", d: "#f2f2f2", gk: "#f5a623" },
+  { name: "Alemania", c: "#f1f1f1", d: "#1a1a22", gk: "#3ac1a6" },
+  { name: "Italia", c: "#2a6bd1", d: "#f2f2f2", gk: "#ffb000" },
+  { name: "Portugal", c: "#a41627", d: "#0c6b38", gk: "#d9e84a" },
+  { name: "Países Bajos", c: "#ff7b1c", d: "#f2f2f2", gk: "#4a4a7a" },
+  { name: "Colombia", c: "#f4cf1c", d: "#1d3c8f", gk: "#b266ff" },
+  { name: "Chile", c: "#d52b2b", d: "#1f3a93", gk: "#e8e8ee" },
+  { name: "Inglaterra", c: "#f4f4f6", d: "#1b2a6b", gk: "#e2402a" },
+  { name: "Japón", c: "#1c3f94", d: "#f2f2f2", gk: "#f5e04a" },
+  { name: "Negro", c: "#2b2b33", d: "#111116", gk: "#ffd23f" },
+  { name: "Verde", c: "#2fbf5c", d: "#14702f", gk: "#ff9fd0" },
+  { name: "Violeta", c: "#8a5cf5", d: "#4a2aa8", gk: "#f2f2f2" },
+] as const;
 
 export const Phase = { Lobby: 0, Countdown: 1, Playing: 2, Restart: 3, Goal: 4, Halftime: 5, End: 6 } as const;
 export const Team = { Red: 0, Blue: 1 } as const;

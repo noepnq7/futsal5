@@ -44,6 +44,8 @@
   #teams li { display: flex; justify-content: space-between; font-size: 13px; }
   #teams li .me { color: var(--brand); font-weight: 700; }
   #teams .n { color: var(--muted); }
+  #teams .kitrow { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+  #teams select { background: #1b1d2a; color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; font: 600 13px var(--head); }
   #teams .hint { margin: -4px 0 8px; font-size: 11.5px; color: var(--muted); }
   #invite { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; color: var(--muted); }
   #invite code { display: block; background: #0b0c11; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; color: var(--text); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -82,11 +84,11 @@
 <canvas id="cv"></canvas>
 
 <div id="top" class="panel" hidden>
-  <span class="team"><i class="dot" style="background:var(--red)"></i><span>Rojo</span></span>
+  <span class="team"><i class="dot" style="background:var(--red)"></i><span id="nRed">Rojo</span></span>
   <span class="score" id="sRed">0</span>
   <span class="mid"><span class="time" id="time"></span><span class="phase" id="phase"></span></span>
   <span class="score" id="sBlue">0</span>
-  <span class="team"><span>Azul</span><i class="dot" style="background:var(--blue)"></i></span>
+  <span class="team"><span id="nBlue">Azul</span><i class="dot" style="background:var(--blue)"></i></span>
 </div>
 
 <div id="sub" class="panel" hidden>
@@ -96,12 +98,13 @@
 </div>
 
 <aside id="teams" class="panel" hidden>
-  <h3><i style="background:var(--red)"></i>Rojo</h3>
+  <h3><i style="background:var(--red)"></i><span id="hRed">Rojo</span></h3>
   <ul id="listRed"></ul>
-  <h3><i style="background:var(--blue)"></i>Azul</h3>
+  <h3><i style="background:var(--blue)"></i><span id="hBlue">Azul</span></h3>
   <ul id="listBlue"></ul>
   <p class="hint">5 contra 5: si falta gente, juegan bots.</p>
   <div id="invite">
+    <label class="kitrow">Equipo de tu lado <select id="kit"></select></label>
     <span>Invitá con este link:</span>
     <code id="link"></code>
     <div class="row"><button class="btn ghost" id="copy">Copiar link</button><button class="btn ghost" id="switch">Cambiar equipo</button></div>

@@ -41,6 +41,7 @@ import {
   TACKLE_CD,
   TACKLE_RANGE,
   Team,
+  TEAMS,
   TRICK_CD,
   TRICK_MS,
   TRICK_NAMES,
@@ -1065,7 +1066,7 @@ export default defineRoom({
       botNames: 0,
     });
     room.state.ball.set(0, { x: 0, z: 0, h: 0 });
-    Object.assign(room.state.game, { phase: Phase.Lobby, timeLeft: HALF_SECONDS, half: 0, red: 0, blue: 0, foulsRed: 0, foulsBlue: 0, rkind: 0, rteam: 0, rleft: 0, rradius: 0 });
+    Object.assign(room.state.game, { kitRed: 0, kitBlue: 1, phase: Phase.Lobby, timeLeft: HALF_SECONDS, half: 0, red: 0, blue: 0, foulsRed: 0, foulsBlue: 0, rkind: 0, rteam: 0, rleft: 0, rradius: 0 });
     syncBots(room);
     placeFormation(room);
   },
@@ -1200,6 +1201,18 @@ export default defineRoom({
       }
       refreshRoles(room);
       placeFormation(room);
+    },
+
+    /** Elegir el equipo de tu lado (camiseta y nombre), mientras se espera. No puede ser el mismo que el rival. */
+    kit(room, p, data: { k: number }) {
+      const g = room.state.game;
+      if (g.phase !== Phase.Lobby) return;
+      const k = Math.floor(Number(data?.k));
+      if (!Number.isFinite(k) || k < 0 || k >= TEAMS.length) return;
+      const m = mine(p);
+      if (m.team === Team.Red) {
+        if (k !== g.kitBlue) g.kitRed = k;
+      } else if (k !== g.kitRed) g.kitBlue = k;
     },
 
     shoot(room, p, data: { a: number; p: number }) {

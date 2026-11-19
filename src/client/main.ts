@@ -21,6 +21,7 @@ import {
   SPOT2,
   SPRINT,
   Team,
+  TEAMS,
 } from "../shared";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -30,6 +31,30 @@ const DARK = ["#a8290f", "#0c6f9c"];
 /** Camiseta del arquero de cada equipo. */
 const GKCOL = ["#f2c230", "#7ee081"];
 const TEAM_NAMES = ["Rojo", "Azul"];
+let kitKey = "";
+/** Pone en COLORS, DARK, GKCOL y TEAM_NAMES los equipos elegidos en la sala. Devuelve true si cambiaron. */
+function applyKits(): boolean {
+  const g = room.state.game;
+  const key = `${g.kitRed}:${g.kitBlue}`;
+  if (key === kitKey) return false;
+  kitKey = key;
+  [g.kitRed, g.kitBlue].forEach((k, i) => {
+    const tm = TEAMS[k] ?? TEAMS[i];
+    COLORS[i] = tm.c;
+    DARK[i] = tm.d;
+    GKCOL[i] = tm.gk;
+    TEAM_NAMES[i] = tm.name;
+  });
+  const root = document.documentElement.style;
+  root.setProperty("--red", COLORS[0]);
+  root.setProperty("--blue", COLORS[1]);
+  $("nRed").textContent = TEAM_NAMES[0];
+  $("nBlue").textContent = TEAM_NAMES[1];
+  $("hRed").textContent = TEAM_NAMES[0];
+  $("hBlue").textContent = TEAM_NAMES[1];
+  staticHalf = -1;
+  return true;
+}
 const RK_NAMES = ["", "Saque del medio", "Saque de banda", "Tiro de esquina", "Saque de arco", "Tiro libre", "Penal", "Doble penal (10 m)"];
 const PAINT = ["#ff4d6d", "#ffd23f", "#3bceac", "#8a6bff"];
 const SKINS = ["#f0c9a0", "#d9a77c", "#b07a52", "#7d5338"];
@@ -123,7 +148,7 @@ function wire() {
     else if (d.kind === Rk.Penalty10) banner("¡DOBLE PENAL!", `Sexta falta de ${TEAM_NAMES[d.team]}: tiro de 10 metros sin barrera`, "#ffd23f", 2600);
   });
   room.on("halftime", (d: { red: number; blue: number }) => {
-    banner("Entretiempo", `Rojo ${d.red} - ${d.blue} Azul · se cambian de lado`, "#ffffff", 4500);
+    banner("Entretiempo", `${TEAM_NAMES[0]} ${d.red} - ${d.blue} ${TEAM_NAMES[1]} · se cambian de lado`, "#ffffff", 4500);
   });
   room.on("end", (d: { red: number; blue: number; winner: number; rows: { name: string; team: number; goals: number; fouls: number; card: number }[] }) => {
     $("endTitle").textContent = d.winner === 2 ? "Empate" : `Ganó el equipo ${TEAM_NAMES[d.winner]}`;
@@ -139,6 +164,9 @@ function wire() {
   room.on("close", () => toast("Se cortó la conexión. Recargá la página para volver."));
   $("start").onclick = () => room.send("start");
   $("switch").onclick = () => room.send("team");
+  const kitSel = $<HTMLSelectElement>("kit");
+  kitSel.innerHTML = TEAMS.map((tm, i) => `<option value="${i}">${tm.name}</option>`).join("");
+  kitSel.onchange = () => room.send("kit", { k: Number(kitSel.value) });
   $("gk").onclick = () => room.send("gk");
   // Botones para el celu.
   const hold = (id: string, down: () => void, up?: () => void) => {
@@ -1091,6 +1119,7 @@ function buildBall(b: { x: number; z: number; h: number }, now: number) {
 
 function renderGL(now: number, W: number, H: number) {
   const G = gl!;
+  applyKits();
   const half = room.state.game.half || 1;
   if (half !== staticHalf) {
     const s = buildStatic(half);
@@ -1686,7 +1715,14 @@ let lastHud = 0;
 function hud(now: number) {
   if (now - lastHud < 100) return;
   lastHud = now;
+  applyKits();
   const gm = room.state.game;
+  const kitSel = $<HTMLSelectElement>("kit");
+  const myTeam = room.view("seats", room.selfId)?.team ?? 0;
+  const mineKit = myTeam === 0 ? gm.kitRed : gm.kitBlue;
+  const otherKit = myTeam === 0 ? gm.kitBlue : gm.kitRed;
+  if (document.activeElement !== kitSel) kitSel.value = String(mineKit);
+  [...kitSel.options].forEach((o) => (o.disabled = Number(o.value) === otherKit));
   const ph = gm.phase;
   if (ph !== Phase.End && !$("endBox").hidden && now - resultAt > 1500) $("endBox").hidden = true;
 

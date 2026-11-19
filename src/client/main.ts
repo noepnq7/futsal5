@@ -391,30 +391,77 @@ uniform mat4 uVP;
 varying vec3 vN;
 varying vec4 vC;
 varying float vD;
+varying vec3 vW;
 void main() {
   vec4 p = uVP * vec4(aPos, 1.0);
   gl_Position = p;
   vN = aNor;
   vC = aCol;
   vD = p.w;
+  vW = aPos;
 }`;
 const FS = `
-precision mediump float;
+precision highp float;
 uniform vec3 uL;
 uniform vec3 uFog;
+uniform mat4 uLVP;
+uniform sampler2D uSh;
+uniform float uShOn;
+uniform vec2 uRes;
 varying vec3 vN;
 varying vec4 vC;
 varying float vD;
+varying vec3 vW;
+float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float vnoise(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
+}
+float shadowAt(vec3 n) {
+  vec4 s = uLVP * vec4(vW + n * 0.03, 1.0);
+  vec3 c = s.xyz * 0.5 + 0.5;
+  if (c.x < 0.0 || c.x > 1.0 || c.y < 0.0 || c.y > 1.0 || c.z >= 1.0) return 1.0;
+  float t = 1.0 / 2048.0;
+  float r = 0.0;
+  for (int i = -1; i <= 1; i++) {
+    for (int j = -1; j <= 1; j++) {
+      float dd = texture2D(uSh, c.xy + vec2(float(i), float(j)) * t * 1.3).r;
+      r += step(c.z - 0.0022, dd);
+    }
+  }
+  return r / 9.0;
+}
 void main() {
   float lit = step(0.001, dot(vN, vN));
+  vec3 base = vC.rgb;
   vec3 n = normalize(vN + (1.0 - lit) * vec3(0.0, 1.0, 0.0));
+  if (lit > 0.5 && n.y > 0.99 && vW.y < 0.03) {
+    float k = vnoise(vW.xz * 16.0) * 0.5 + vnoise(vW.xz * 3.0) * 0.5;
+    base *= 0.9 + 0.2 * k;
+  }
   float d = max(dot(n, uL), 0.0);
+  float sh = (lit > 0.5 && uShOn > 0.5) ? shadowAt(n) : 1.0;
   float hemi = 0.5 + 0.5 * n.y;
-  vec3 col = mix(vC.rgb, vC.rgb * (0.36 + 0.36 * hemi + 0.62 * d), lit);
+  vec3 amb = mix(vec3(0.30, 0.30, 0.44), vec3(0.50, 0.47, 0.54), hemi);
+  vec3 sun = vec3(1.0, 0.92, 0.78) * 0.95;
+  vec3 col = mix(base, base * (amb + sun * d * sh), lit);
   float f = clamp((vD - 55.0) / 70.0, 0.0, 0.7);
   col = mix(col, uFog, f);
+  col = pow(col, vec3(0.93));
+  vec2 q = gl_FragCoord.xy / uRes;
+  float vg = smoothstep(1.15, 0.3, length(q - 0.5) * 1.2);
+  col *= mix(0.7, 1.0, vg);
   gl_FragColor = vec4(col, vC.a);
 }`;
+const DVS = `
+attribute vec3 aPos;
+uniform mat4 uVP;
+void main() { gl_Position = uVP * vec4(aPos, 1.0); }`;
+const DFS = `
+precision lowp float;
+void main() { gl_FragColor = vec4(1.0); }`;
 
 type M = number[];
 const T = (x: number, y: number, z: number): M => [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y, z, 1];
@@ -585,6 +632,24 @@ let useGL = false;
 let uVP: WebGLUniformLocation | null = null;
 let uL: WebGLUniformLocation | null = null;
 let uFog: WebGLUniformLocation | null = null;
+let uLVP: WebGLUniformLocation | null = null;
+let uSh: WebGLUniformLocation | null = null;
+let uShOn: WebGLUniformLocation | null = null;
+let uRes: WebGLUniformLocation | null = null;
+let uDVP: WebGLUniformLocation | null = null;
+let progMain: WebGLProgram | null = null;
+let progDepth: WebGLProgram | null = null;
+let shFbo: WebGLFramebuffer | null = null;
+let shTex: WebGLTexture | null = null;
+let useShadows = false;
+const SH_SIZE = 2048;
+const LDIR = (() => {
+  const v = [-0.5, 0.78, -0.38];
+  const l = Math.hypot(v[0], v[1], v[2]);
+  return v.map((c) => c / l);
+})();
+let bufC: WebGLBuffer | null = null;
+let nC = 0;
 let aPos = 0;
 let aNor = 0;
 let aCol = 0;
@@ -613,19 +678,68 @@ function compileShader(type: number, src: string): WebGLShader {
 function initGL(): boolean {
   try {
     gl = glCv.getContext("webgl", { antialias: true, alpha: false });
-    if (!gl) return false;
+    if (!gl) {
+      console.warn("initGL: sin contexto webgl");
+      return false;
+    }
     const p = gl.createProgram()!;
     gl.attachShader(p, compileShader(gl.VERTEX_SHADER, VS));
     gl.attachShader(p, compileShader(gl.FRAGMENT_SHADER, FS));
+    gl.bindAttribLocation(p, 0, "aPos");
+    gl.bindAttribLocation(p, 1, "aNor");
+    gl.bindAttribLocation(p, 2, "aCol");
     gl.linkProgram(p);
-    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) return false;
-    gl.useProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+      console.warn("initGL: link", gl.getProgramInfoLog(p));
+      return false;
+    }
+    progMain = p;
     uVP = gl.getUniformLocation(p, "uVP");
     uL = gl.getUniformLocation(p, "uL");
     uFog = gl.getUniformLocation(p, "uFog");
-    aPos = gl.getAttribLocation(p, "aPos");
-    aNor = gl.getAttribLocation(p, "aNor");
-    aCol = gl.getAttribLocation(p, "aCol");
+    uLVP = gl.getUniformLocation(p, "uLVP");
+    uSh = gl.getUniformLocation(p, "uSh");
+    uShOn = gl.getUniformLocation(p, "uShOn");
+    uRes = gl.getUniformLocation(p, "uRes");
+    aPos = 0;
+    aNor = 1;
+    aCol = 2;
+    useShadows = false;
+    try {
+      // Sombras de verdad: un mapa de profundidad desde la luz. Si el dispositivo no puede, quedan las sombras redondas.
+      if (gl.getExtension("WEBGL_depth_texture")) {
+        const dp = gl.createProgram()!;
+        gl.attachShader(dp, compileShader(gl.VERTEX_SHADER, DVS));
+        gl.attachShader(dp, compileShader(gl.FRAGMENT_SHADER, DFS));
+        gl.bindAttribLocation(dp, 0, "aPos");
+        gl.linkProgram(dp);
+        if (gl.getProgramParameter(dp, gl.LINK_STATUS)) {
+          progDepth = dp;
+          uDVP = gl.getUniformLocation(dp, "uVP");
+          shTex = gl.createTexture();
+          gl.bindTexture(gl.TEXTURE_2D, shTex);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT, SH_SIZE, SH_SIZE, 0, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          const rb = gl.createRenderbuffer();
+          gl.bindRenderbuffer(gl.RENDERBUFFER, rb);
+          gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA4, SH_SIZE, SH_SIZE);
+          shFbo = gl.createFramebuffer();
+          gl.bindFramebuffer(gl.FRAMEBUFFER, shFbo);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, shTex, 0);
+          gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, rb);
+          useShadows = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        }
+      }
+    } catch (e) {
+      console.warn("sombras:", e);
+      useShadows = false;
+    }
+    (window as any).__dbg = { useShadows };
+    bufC = gl.createBuffer();
     bufO = gl.createBuffer();
     bufF = gl.createBuffer();
     bufG = gl.createBuffer();
@@ -633,7 +747,8 @@ function initGL(): boolean {
     bufD = gl.createBuffer();
     staticHalf = -1;
     return true;
-  } catch {
+  } catch (e) {
+    console.warn("initGL:", e);
     gl = null;
     return false;
   }
@@ -654,13 +769,14 @@ function buildStatic(half: number) {
   const O = new Buf();
   const F = new Buf();
   const G = new Buf();
+  const C = new Buf();
   const X = HALF_L + 4;
   // Fondo: cielo, calle y vereda.
   gradQuad(O, [[-300, 0, BZ + 120], [300, 0, BZ + 120], [300, 50, BZ + 120], [-300, 50, BZ + 120]], ["#3d2547", "#3d2547", "#0c0a1a", "#0c0a1a"]);
   flat(O, -300, -50, 300, 220, -0.03, "#14151c");
   flat(O, -(HALF_L + 9), -(HALF_W + 5), HALF_L + 9, BZ + 2.5, -0.015, "#1b1d26");
   // La cancha con sus baldosas.
-  flat(O, -HALF_L, -HALF_W, HALF_L, HALF_W, 0, "#3a3d4a");
+  for (let i = 0; i < 8; i++) flat(O, -HALF_L + i * 5, -HALF_W, -HALF_L + (i + 1) * 5, HALF_W, 0, i % 2 ? "#383b48" : "#3d4150");
   for (let x = -HALF_L + 2.5; x < HALF_L; x += 2.5) segLine(O, x, -HALF_W, x, HALF_W, 0.04, 0.004, "#454959");
   for (let z = -HALF_W + 2.5; z < HALF_W; z += 2.5) segLine(O, -HALF_L, z, HALF_L, z, 0.04, 0.004, "#454959");
   // Pozos de luz de los postes.
@@ -669,7 +785,7 @@ function buildStatic(half: number) {
     [HALF_L * 0.55, HALF_W * 0.5],
     [-HALF_L * 0.55, -HALF_W * 0.5],
     [HALF_L * 0.55, -HALF_W * 0.5],
-  ]) flatPoly(F, circlePts(lx, lz, 9, 24), 0.007, "#ffe2a0", 0.06);
+  ]) flatPoly(F, circlePts(lx, lz, 9, 24), 0.007, "#ffe2a0", 0.045);
   // Áreas penales (cuarto de círculo de 6 m desde cada palo), pintadas del color de quien defiende.
   const W_ = "#eeeef2";
   for (const sign of [-1, 1]) {
@@ -741,6 +857,9 @@ function buildStatic(half: number) {
     boxAt(O, x1, GOAL_H / 2, -GOAL_HALF, 0.12, GOAL_H, 0.12, col);
     boxAt(O, x1, GOAL_H / 2, GOAL_HALF, 0.12, GOAL_H, 0.12, col);
     boxAt(O, x1, GOAL_H, 0, 0.12, 0.12, GOAL_HALF * 2 + 0.12, col);
+    boxAt(C, x1, GOAL_H / 2, -GOAL_HALF, 0.12, GOAL_H, 0.12, col);
+    boxAt(C, x1, GOAL_H / 2, GOAL_HALF, 0.12, GOAL_H, 0.12, col);
+    boxAt(C, x1, GOAL_H, 0, 0.12, 0.12, GOAL_HALF * 2 + 0.12, col);
     boxAt(O, x2, GOAL_H / 2, 0, 0.05, GOAL_H, GOAL_HALF * 2, "#e8ecff", 0.22);
     boxAt(O, (x1 + x2) / 2, GOAL_H / 2, -GOAL_HALF, GOAL_DEPTH, GOAL_H, 0.04, "#e8ecff", 0.14);
     boxAt(O, (x1 + x2) / 2, GOAL_H / 2, GOAL_HALF, GOAL_DEPTH, GOAL_H, 0.04, "#e8ecff", 0.14);
@@ -752,6 +871,7 @@ function buildStatic(half: number) {
       const px = sx * (HALF_L + 3);
       const pz = sz > 0 ? BZ + 0.8 : -(HALF_W + 2);
       boxAt(O, px, 2.7, pz, 0.22, 5.4, 0.22, "#2a2d3a");
+      boxAt(C, px, 2.7, pz, 0.22, 5.4, 0.22, "#2a2d3a");
       boxAt(O, px, 5.5, pz, 0.9, 0.18, 0.9, "#fff0c4", 1, false);
     }
   }
@@ -769,7 +889,7 @@ function buildStatic(half: number) {
       }
     }
   }
-  return { O, F, G };
+  return { O, F, G, C };
 }
 
 function upload(buf: WebGLBuffer | null, b: Buf, dynamic: boolean) {
@@ -825,10 +945,69 @@ interface Pl {
 }
 
 function shadow(x: number, z: number, r: number, a: number) {
+  if (useShadows) return;
   flatPoly(SB, circlePts(x, z, r, 12), 0.02, "#000000", a);
 }
 
-/** Un jugador en 3D: piernas, short, remera, brazos y cabeza que se mueven al caminar. */
+/** Aplica una matriz rígida a un punto y a una dirección. */
+const tp = (m: M, x: number, y: number, z: number): [number, number, number] => [m[0] * x + m[4] * y + m[8] * z + m[12], m[1] * x + m[5] * y + m[9] * z + m[13], m[2] * x + m[6] * y + m[10] * z + m[14]];
+const tn = (m: M, x: number, y: number, z: number): [number, number, number] => [m[0] * x + m[4] * y + m[8] * z, m[1] * x + m[5] * y + m[9] * z, m[2] * x + m[6] * y + m[10] * z];
+
+/** Cilindro (o cono, elíptico) a lo largo de Y, de -h/2 a +h/2, redondeado en el corte. */
+function tube(buf: Buf, m: M, rxT: number, rzT: number, rxB: number, rzB: number, h: number, col: string, n = 9) {
+  const c = rgb(col);
+  for (let i = 0; i < n; i++) {
+    const a0 = (i / n) * TAU;
+    const a1 = ((i + 1) / n) * TAU;
+    const pts: [number, number, number, number, number, number][] = [];
+    for (const [a, top] of [[a0, 1], [a1, 1], [a1, 0], [a0, 0]] as [number, number][]) {
+      const rx = top ? rxT : rxB;
+      const rz = top ? rzT : rzB;
+      const cx = Math.cos(a);
+      const sz = Math.sin(a);
+      const P = tp(m, cx * rx, top ? h / 2 : -h / 2, sz * rz);
+      const N = tn(m, cx / Math.max(rx, 0.01), 0, sz / Math.max(rz, 0.01));
+      const l = Math.hypot(N[0], N[1], N[2]) || 1;
+      pts.push([P[0], P[1], P[2], N[0] / l, N[1] / l, N[2] / l]);
+    }
+    for (const k of IDX) {
+      const q = pts[k];
+      buf.v(q[0], q[1], q[2], q[3], q[4], q[5], c, 1);
+    }
+  }
+}
+const limb = (buf: Buf, m: M, r: number, h: number, col: string) => {
+  tube(buf, m, r, r, r, r, h, col, 8);
+  for (const e of [-1, 1]) {
+    const p = tp(m, 0, (e * h) / 2, 0);
+    sphere(buf, p[0], p[1], p[2], r, () => col, 4, 8);
+  }
+};
+/** Esfera con su propio giro: el color depende de la dirección local. */
+function sphereR(buf: Buf, m: M, r: number, col: (dx: number, dy: number, dz: number) => string, nLat: number, nLon: number) {
+  const dir = (t: number, p: number): [number, number, number] => [Math.sin(t) * Math.cos(p), Math.cos(t), Math.sin(t) * Math.sin(p)];
+  for (let i = 0; i < nLat; i++) {
+    const t0 = (i / nLat) * Math.PI;
+    const t1 = ((i + 1) / nLat) * Math.PI;
+    for (let j = 0; j < nLon; j++) {
+      const p0 = (j / nLon) * TAU;
+      const p1 = ((j + 1) / nLon) * TAU;
+      const dm = dir((t0 + t1) / 2, (p0 + p1) / 2);
+      const c = rgb(col(dm[0], dm[1], dm[2]));
+      const A = dir(t0, p0);
+      const B = dir(t0, p1);
+      const C = dir(t1, p1);
+      const D_ = dir(t1, p0);
+      for (const q of [A, B, C, A, C, D_]) {
+        const P = tp(m, q[0] * r, q[1] * r, q[2] * r);
+        const N = tn(m, q[0], q[1], q[2]);
+        buf.v(P[0], P[1], P[2], N[0], N[1], N[2], c, 1);
+      }
+    }
+  }
+}
+
+/** Un jugador en 3D: piernas con medias y botines, short, remera, brazos, cuello y cabeza con pelo. */
 function buildCharacter(id: number, p: Pl, now: number) {
   const st = motion.get(id);
   const moving = Math.min(1, (st?.speed ?? 0) / 2.5);
@@ -839,37 +1018,75 @@ function buildCharacter(id: number, p: Pl, now: number) {
   const t = p.team % 2;
   const shirt = p.gk ? GKCOL[t] : COLORS[t];
   const skin = SKINS[hash(p.name) % SKINS.length];
-  const hair = HAIR[(hash(p.name) >> 3) % HAIR.length];
+  const hair = HAIR[(hash(p.name) >>> 3) % HAIR.length];
   const root = mul(T(p.x, hop, p.z), RY(p.yaw + spin));
   const at = (x: number, y: number, z: number) => mul(root, T(x, y, z));
   const sw = Math.sin(phase * 2) * 0.85 * moving;
+  const bob = Math.abs(Math.sin(phase * 2)) * 0.03 * moving;
   shadow(p.x, p.z, 0.55, 0.38);
   for (const side of [-1, 1]) {
-    const leg = mul(at(0, 0.86, side * 0.12), RZ(side * sw));
-    box(DB, mul(leg, T(0, -0.38, 0)), 0.16, 0.76, 0.16, skin);
-    box(DB, mul(leg, T(0, -0.3, 0)), 0.18, 0.3, 0.18, "#f1f1f1");
-    box(DB, mul(leg, T(0.06, -0.74, 0)), 0.3, 0.12, 0.17, "#f4f4f4");
-    box(DB, mul(leg, T(0.06, -0.7, 0)), 0.31, 0.03, 0.18, COLORS[t]);
+    const knee = Math.max(0, -side * sw) * 0.5;
+    const leg = mul(at(0, 0.86 + bob, side * 0.12), RZ(side * sw));
+    limb(DB, mul(leg, T(0, -0.2, 0)), 0.088, 0.3, "#f1f1f1");
+    limb(DB, mul(mul(leg, T(0, -0.4, 0)), mul(RZ(knee), T(0, -0.14, 0))), 0.07, 0.26, skin);
+    limb(DB, mul(mul(leg, T(0, -0.4, 0)), mul(RZ(knee), T(0, -0.4, 0))), 0.075, 0.2, COLORS[t]);
+    box(DB, mul(mul(leg, T(0, -0.4, 0)), mul(RZ(knee), T(0.06, -0.54, 0))), 0.3, 0.1, 0.15, "#1b1b22");
+    box(DB, mul(mul(leg, T(0, -0.4, 0)), mul(RZ(knee), T(0.06, -0.595, 0))), 0.31, 0.025, 0.16, "#f4f4f4");
   }
-  box(DB, at(0, 0.9, 0), 0.32, 0.32, 0.54, DARK[t]);
-  box(DB, at(0, 1.2, 0), 0.3, 0.6, 0.5, shirt);
+  tube(DB, at(0, 0.98 + bob, 0), 0.15, 0.2, 0.16, 0.22, 0.2, DARK[t], 10);
+  tube(DB, at(0, 1.27 + bob, 0), 0.14, 0.27, 0.13, 0.2, 0.6, shirt, 10);
+  box(DB, at(0.02, 1.2 + bob, 0), 0.31, 0.035, 0.0 + 0.4, p.gk ? "#222" : "#ffffff");
   for (const side of [-1, 1]) {
-    const arm = mul(at(0, 1.42, side * 0.34), RZ(-side * sw * 0.9));
-    box(DB, mul(arm, T(0, -0.27, 0)), 0.13, 0.54, 0.13, skin);
-    box(DB, mul(arm, T(0, -0.1, 0)), 0.17, 0.22, 0.17, shirt);
-    if (p.gk) box(DB, mul(arm, T(0, -0.56, 0)), 0.17, 0.16, 0.17, "#f2f2f2");
+    const arm = mul(at(0, 1.48 + bob, side * 0.3), RZ(-side * sw * 0.9));
+    limb(DB, mul(arm, T(0, -0.12, 0)), 0.068, 0.22, shirt);
+    limb(DB, mul(arm, T(0, -0.34, 0)), 0.055, 0.26, skin);
+    sphere(DB, ...(tp(mul(arm, T(0, -0.5, 0)), 0, 0, 0) as [number, number, number]), p.gk ? 0.075 : 0.055, () => (p.gk ? "#f2f2f2" : skin), 4, 6);
   }
-  sphere(DB, p.x, 1.7 + hop, p.z, 0.2, () => skin, 5, 8);
-  box(DB, at(0, 1.9, 0), 0.4, 0.1, 0.4, hair);
-  box(DB, at(0, 1.77, 0), 0.43, 0.05, 0.43, COLORS[t]);
-  box(DB, at(0.2, 1.68, 0), 0.06, 0.07, 0.07, "#c98f6a");
+  limb(DB, at(0, 1.62 + bob, 0), 0.055, 0.1, skin);
+  const head = at(0, 1.78 + bob, 0);
+  sphereR(DB, head, 0.2, (dx, dy, dz) => (dy > 0.3 || (dx < -0.15 && dy > -0.35) || (Math.abs(dz) > 0.8 && dy > -0.1) ? hair : skin), 8, 14);
+  for (const side of [-1, 1]) {
+    const e = tp(head, 0.18, 0.02, side * 0.07);
+    sphere(DB, e[0], e[1], e[2], 0.027, () => "#15151a", 3, 5);
+  }
+  tube(DB, mul(head, T(0, 0.07, 0)), 0.205, 0.205, 0.205, 0.205, 0.045, COLORS[t], 12);
 }
 
+const PHI = (1 + Math.sqrt(5)) / 2;
+const ICO = ([
+  [0, 1, PHI], [0, -1, PHI], [0, 1, -PHI], [0, -1, -PHI],
+  [1, PHI, 0], [-1, PHI, 0], [1, -PHI, 0], [-1, -PHI, 0],
+  [PHI, 0, 1], [-PHI, 0, 1], [PHI, 0, -1], [-PHI, 0, -1],
+] as [number, number, number][]).map((v) => {
+  const l = Math.hypot(...v);
+  return [v[0] / l, v[1] / l, v[2] / l] as [number, number, number];
+});
 function buildBall(b: { x: number; z: number; h: number }, now: number) {
   const r = BALL_R * 1.15;
-  const off = Math.floor(((b.x + b.z) * 1.4 + now / 4000) * 3);
+  const rz = -b.x / r;
+  const rx = b.z / r;
+  const cz = Math.cos(rz);
+  const sz = Math.sin(rz);
+  const cx = Math.cos(rx);
+  const sx = Math.sin(rx);
   shadow(b.x, b.z, r * (1 - Math.min(0.5, b.h * 0.1)) * 1.1, 0.4);
-  sphere(DB, b.x, BALL_R + b.h, b.z, r, (i, j) => ((((i + j + off) % 3) + 3) % 3 === 0 ? "#262626" : "#fbfaf5"), 8, 12);
+  sphereR(
+    DB,
+    T(b.x, BALL_R + b.h, b.z),
+    r,
+    (dx, dy, dz) => {
+      // Gira con lo que rueda: primero alrededor de Z, después de X.
+      const x1 = dx * cz - dy * sz;
+      const y1 = dx * sz + dy * cz;
+      const y2 = y1 * cx - dz * sx;
+      const z2 = y1 * sx + dz * cx;
+      let best = -1;
+      for (const v of ICO) best = Math.max(best, x1 * v[0] + y2 * v[1] + z2 * v[2]);
+      return best > 0.88 ? "#202126" : "#fbfaf5";
+    },
+    14,
+    20,
+  );
 }
 
 function renderGL(now: number, W: number, H: number) {
@@ -880,6 +1097,8 @@ function renderGL(now: number, W: number, H: number) {
     upload(bufO, s.O, false);
     upload(bufF, s.F, false);
     upload(bufG, s.G, false);
+    upload(bufC, s.C, false);
+    nC = s.C.n;
     nO = s.O.n;
     nF = s.F.n;
     nG = s.G.n;
@@ -896,17 +1115,52 @@ function renderGL(now: number, W: number, H: number) {
   upload(bufS, SB, true);
   upload(bufD, DB, true);
 
+  const L = LDIR;
+  let lvp: Float32Array | null = null;
+  if (useShadows && progDepth && shFbo) {
+    // Cámara ortogonal desde la luz que abarca toda la cancha.
+    const rx = Math.hypot(L[2], L[0]) || 1;
+    const r = [L[2] / rx, 0, -L[0] / rx];
+    const u = [L[1] * r[2] - L[2] * r[1], L[2] * r[0] - L[0] * r[2], L[0] * r[1] - L[1] * r[0]];
+    const ex = 34;
+    const ez = 70;
+    lvp = new Float32Array([r[0] / ex, u[0] / ex, -L[0] / ez, 0, r[1] / ex, u[1] / ex, -L[1] / ez, 0, r[2] / ex, u[2] / ex, -L[2] / ez, 0, 0, 0, 0, 1]);
+    G.bindFramebuffer(G.FRAMEBUFFER, shFbo);
+    G.viewport(0, 0, SH_SIZE, SH_SIZE);
+    G.depthMask(true);
+    G.clear(G.DEPTH_BUFFER_BIT);
+    G.useProgram(progDepth);
+    G.disable(G.BLEND);
+    G.enable(G.DEPTH_TEST);
+    G.enable(G.POLYGON_OFFSET_FILL);
+    G.polygonOffset(2, 4);
+    G.uniformMatrix4fv(uDVP, false, lvp);
+    drawBuf(bufC, nC, true);
+    drawBuf(bufD, DB.n, true);
+    G.disable(G.POLYGON_OFFSET_FILL);
+    G.bindFramebuffer(G.FRAMEBUFFER, null);
+  }
+
   G.viewport(0, 0, glCv.width, glCv.height);
   G.clearColor(0.05, 0.05, 0.08, 1);
+  G.depthMask(true);
   G.clear(G.COLOR_BUFFER_BIT | G.DEPTH_BUFFER_BIT);
-  G.useProgram(G.getParameter(G.CURRENT_PROGRAM));
+  G.useProgram(progMain);
   G.enable(G.DEPTH_TEST);
   G.depthFunc(G.LEQUAL);
   G.enable(G.BLEND);
   G.blendFunc(G.SRC_ALPHA, G.ONE_MINUS_SRC_ALPHA);
   G.uniformMatrix4fv(uVP, false, vpMatrix(W, H));
-  G.uniform3f(uL, -0.3, 0.85, -0.42);
+  G.uniform3f(uL, L[0], L[1], L[2]);
   G.uniform3f(uFog, 0.08, 0.06, 0.12);
+  G.uniform2f(uRes, glCv.width, glCv.height);
+  G.uniform1f(uShOn, lvp ? 1 : 0);
+  if (lvp) {
+    G.uniformMatrix4fv(uLVP, false, lvp);
+    G.activeTexture(G.TEXTURE0);
+    G.bindTexture(G.TEXTURE_2D, shTex);
+    G.uniform1i(uSh, 0);
+  }
   drawBuf(bufO, nO, true);
   drawBuf(bufF, nF, false);
   drawBuf(bufS, SB.n, false);
@@ -1152,7 +1406,7 @@ function character2d(id: number, p: Pl, now: number) {
   const t = p.team % 2;
   const shirt = p.gk ? GKCOL[t] : COLORS[t];
   const skin = SKINS[hash(p.name) % SKINS.length];
-  const hair = HAIR[(hash(p.name) >> 3) % HAIR.length];
+  const hair = HAIR[(hash(p.name) >>> 3) % HAIR.length];
   if (p.fx === Fx.Out) g.globalAlpha = 0.5;
   g.fillStyle = "rgba(0,0,0,.38)";
   g.beginPath();
@@ -1294,7 +1548,8 @@ function scene(now: number, dt: number, W: number, H: number) {
   if (useGL) {
     try {
       renderGL(now, W, H);
-    } catch {
+    } catch (e) {
+      (window as any).__err = String((e as Error)?.stack ?? e);
       disableGL();
     }
   }

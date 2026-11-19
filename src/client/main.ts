@@ -126,7 +126,10 @@ $("joinForm").addEventListener("submit", async (e) => {
   wire();
   useGL = initGL();
   glCv.style.display = useGL ? "block" : "none";
-  for (const id of ["top", "sub", "teams", "help", "net"]) $(id).hidden = false;
+  for (const id of ["top", "sub", "teams", "help", "net", "fpBtn"]) $(id).hidden = false;
+  room.on("own", (d: { yaw: number }) => {
+    fpYaw = d.yaw;
+  });
   requestAnimationFrame(frame);
 });
 
@@ -231,6 +234,7 @@ function relAt(x: number, h: number, z: number, camX: number) {
 const rel = (x: number, h: number, z: number) => relAt(x, h, z, CAM_X);
 /** Punto del mundo (x, altura, z) a pantalla: [X, Y, píxeles por metro a esa distancia]. */
 function proj(x: number, h: number, z: number): [number, number, number] {
+  if (fp) return projFp(x, h, z);
   const r = rel(x, h, z);
   return [OFF_X + FOCAL * r.rx, OFF_Y + FOCAL * r.ry, FOCAL / r.zc];
 }
@@ -277,6 +281,71 @@ function fitCamera(W: number, H: number) {
   PAN_MAX = X * Math.max(0, 1 - FOCAL_FULL / FOCAL);
 }
 
+// ── primera persona (tecla V): la cámara está en los ojos del jugador y el mouse gira ──
+let fp = false;
+let fpYaw = 0;
+let fpPitch = 0;
+const FP_T = Math.tan((78 * Math.PI) / 360);
+const FPV = { ex: 0, ey: 1.62, ez: 0, r: [0, 0, 0], u: [0, 0, 0], f: [0, 0, 0], W: 1, H: 1 };
+function updateFpView(W: number, H: number) {
+  const m = room.mine;
+  if (!m) {
+    fp = false;
+    return;
+  }
+  const cp = Math.cos(fpPitch);
+  const f = [cp * Math.cos(fpYaw), Math.sin(fpPitch), cp * Math.sin(fpYaw)];
+  const r = [Math.sin(fpYaw), 0, -Math.cos(fpYaw)];
+  FPV.f = f;
+  FPV.r = r;
+  FPV.u = [f[1] * r[2] - f[2] * r[1], f[2] * r[0] - f[0] * r[2], f[0] * r[1] - f[1] * r[0]];
+  FPV.ex = m.x + Math.cos(fpYaw) * 0.12;
+  FPV.ez = m.z + Math.sin(fpYaw) * 0.12;
+  FPV.ey = 1.62;
+  FPV.W = W;
+  FPV.H = H;
+}
+function projFp(x: number, h: number, z: number): [number, number, number] {
+  const dx = x - FPV.ex;
+  const dy = h - FPV.ey;
+  const dz = z - FPV.ez;
+  const dep = FPV.f[0] * dx + FPV.f[1] * dy + FPV.f[2] * dz;
+  if (dep < 0.15) return [-1e6, -1e6, 0];
+  const k = FPV.H / 2 / FP_T / dep;
+  return [FPV.W / 2 + k * (FPV.r[0] * dx + FPV.r[2] * dz), FPV.H / 2 - k * (FPV.u[0] * dx + FPV.u[1] * dy + FPV.u[2] * dz), k];
+}
+function fpMatrix(): Float32Array {
+  const asp = FPV.W / FPV.H;
+  const n = 0.1;
+  const fa = 300;
+  const A = (fa + n) / (fa - n);
+  const B = (-2 * fa * n) / (fa - n);
+  const { r, u, f } = FPV;
+  const e = [FPV.ex, FPV.ey, FPV.ez];
+  const dot = (v: number[]) => v[0] * e[0] + v[1] * e[1] + v[2] * e[2];
+  const sx = 1 / (asp * FP_T);
+  const sy = 1 / FP_T;
+  return new Float32Array([
+    r[0] * sx, u[0] * sy, A * f[0], f[0],
+    r[1] * sx, u[1] * sy, A * f[1], f[1],
+    r[2] * sx, u[2] * sy, A * f[2], f[2],
+    -dot(r) * sx, -dot(u) * sy, -A * dot(f) + B, -dot(f),
+  ]);
+}
+function setFp(on: boolean) {
+  if (on && (!useGL || !room?.mine)) {
+    toast("La primera persona necesita el 3D");
+    return;
+  }
+  fp = on;
+  if (on) {
+    fpYaw = room.mine.yaw;
+    fpPitch = 0;
+    cv.requestPointerLock?.();
+  } else if (document.pointerLockElement) document.exitPointerLock();
+  $("fpBtn").textContent = on ? "👁 Volver a la vista de arriba (V)" : "👁 Primera persona (V)";
+}
+
 // ── controles ──
 const keys = new Set<string>();
 let mouse = { x: -1e9, y: -1e9 };
@@ -288,6 +357,7 @@ const held = (...c: string[]) => (c.some((k) => keys.has(k)) ? 1 : 0);
 function aim(): number {
   const m = room.mine;
   if (!m) return 0;
+  if (fp) return fpYaw;
   if (mouse.x > -1e8) {
     const w = unproj(mouse.x, mouse.y);
     return Math.atan2(w.z - m.z, w.x - m.x);
@@ -330,7 +400,8 @@ window.addEventListener("keydown", (e) => {
     return;
   }
   if (e.repeat) return;
-  if (e.code === "KeyE") pass();
+  if (e.code === "KeyV") setFp(!fp);
+  else if (e.code === "KeyE") pass();
   else if (e.code === "KeyQ" || e.code === "KeyF") trick();
   else if (e.code === "KeyC" || e.code === "KeyX") tackle();
   else keys.add(e.code);
@@ -348,6 +419,12 @@ const cv = $<HTMLCanvasElement>("cv");
 const glCv = $<HTMLCanvasElement>("gl");
 const g = cv.getContext("2d")!;
 cv.addEventListener("contextmenu", (e) => e.preventDefault());
+document.addEventListener("mousemove", (e) => {
+  if (!fp || document.pointerLockElement !== cv) return;
+  fpYaw += e.movementX * 0.0025;
+  fpPitch = Math.max(-0.5, Math.min(0.5, fpPitch - e.movementY * 0.0022));
+});
+$("fpBtn").onclick = () => setFp(!fp);
 cv.addEventListener("pointermove", (e) => {
   mouse = { x: e.clientX, y: e.clientY };
   if (pressing && e.pointerType !== "mouse") dest = unproj(e.clientX, e.clientY);
@@ -355,6 +432,10 @@ cv.addEventListener("pointermove", (e) => {
 cv.addEventListener("pointerleave", () => (mouse = { x: -1e9, y: -1e9 }));
 cv.addEventListener("pointerdown", (e) => {
   if (!room) return;
+  if (fp && e.pointerType === "mouse" && document.pointerLockElement !== cv) {
+    cv.requestPointerLock?.();
+    return;
+  }
   if (e.pointerType === "mouse") {
     mouse = { x: e.clientX, y: e.clientY };
     if (e.button === 2) pass();
@@ -393,6 +474,12 @@ function update(dt: number) {
       iz = dz / d;
     }
   }
+  if (fp) {
+    const fw = held("KeyW", "ArrowUp") - held("KeyS", "ArrowDown");
+    const st = held("KeyD", "ArrowRight") - held("KeyA", "ArrowLeft");
+    ix = Math.cos(fpYaw) * fw + Math.sin(fpYaw) * st;
+    iz = Math.sin(fpYaw) * fw - Math.cos(fpYaw) * st;
+  }
   const sprint = held("ShiftLeft", "ShiftRight") === 1 && stamina > 0.02 && (ix !== 0 || iz !== 0);
   stamina = sprint ? Math.max(0, stamina - dt * 0.4) : Math.min(1, stamina + dt * 0.25);
   let speed = sprint ? SPRINT : SPEED;
@@ -403,11 +490,14 @@ function update(dt: number) {
     iz = Math.sin(dashYaw);
     speed = DASH_SPEED;
   }
-  if (!ix && !iz) return;
+  if (!ix && !iz) {
+    if (fp) room.move({ x: m.x, z: m.z, yaw: fpYaw });
+    return;
+  }
   const l = Math.hypot(ix, iz);
   const x = Math.max(-(HALF_L - 0.4), Math.min(HALF_L - 0.4, m.x + (ix / l) * speed * dt));
   const z = Math.max(-(HALF_W - 0.4), Math.min(HALF_W - 0.4, m.z + (iz / l) * speed * dt));
-  room.move({ x, z, yaw: Math.atan2(iz, ix) });
+  room.move({ x, z, yaw: fp ? fpYaw : Math.atan2(iz, ix) });
 }
 
 // ── 3D: motor WebGL propio (Fogón no deja usar librerías) ──
@@ -941,6 +1031,7 @@ function drawBuf(buf: WebGLBuffer | null, n: number, depthWrite: boolean) {
 
 /** Matriz que reproduce exactamente la cámara de proj(): lo que dibuja el 3D calza con los nombres y carteles. */
 function vpMatrix(W: number, H: number): Float32Array {
+  if (fp) return fpMatrix();
   const a = FOCAL / (W / 2);
   const b = (OFF_X - W / 2) / (W / 2);
   const c = FOCAL / (H / 2);
@@ -1137,7 +1228,7 @@ function renderGL(now: number, W: number, H: number) {
   DB.clear();
   for (const id of room.state.people.keys()) {
     const p = room.view("people", id);
-    if (p) buildCharacter(id, p, now);
+    if (p && !(fp && p === room.mine)) buildCharacter(id, p, now);
   }
   const b = room.view("ball", 0);
   if (b) buildBall(b, now);
@@ -1591,13 +1682,13 @@ function scene(now: number, dt: number, W: number, H: number) {
   }
 
   // Zona de respeto de la reanudación: los rivales no pueden entrar.
-  if (gm.phase === Phase.Restart && b) {
+  if (gm.phase === Phase.Restart && b && !fp) {
     g.setLineDash([10, 8]);
     ring(b.x, b.z, gm.rradius, COLORS[gm.rteam % 2], 3);
     g.setLineDash([]);
   }
   // Dirección y fuerza del tiro mientras se carga.
-  if (charging && me) {
+  if (charging && me && !fp) {
     const frac = Math.min(1, (now - chargeStart) / 900);
     const a = aim();
     g.strokeStyle = `rgba(255,${Math.round(227 - 140 * frac)},77,.85)`;
@@ -1624,7 +1715,7 @@ function scene(now: number, dt: number, W: number, H: number) {
       z: p.z,
       draw: () => {
         if (!useGL) character2d(id, p, now);
-        label(p, now, taking);
+        if (!(fp && p === me)) label(p, now, taking);
       },
     });
   }
@@ -1652,7 +1743,7 @@ function scene(now: number, dt: number, W: number, H: number) {
     g.stroke();
   }
   // Carga del tiro: anillo alrededor de los pies.
-  if (charging && me) {
+  if (charging && me && !fp) {
     const frac = Math.min(1, (now - chargeStart) / 900);
     const [x, y, s] = proj(me.x, 0, me.z);
     g.strokeStyle = frac >= 1 ? "#ff5a36" : "#ffe34d";
@@ -1680,6 +1771,21 @@ function scene(now: number, dt: number, W: number, H: number) {
     g.fillText(pp.text, x, y - f * s * 1.8);
     g.globalAlpha = 1;
   }
+  if (fp) {
+    // Mira y fuerza del tiro.
+    g.strokeStyle = "rgba(255,255,255,.85)";
+    g.lineWidth = 2;
+    g.beginPath();
+    g.arc(W / 2, H / 2, 6, 0, TAU);
+    g.stroke();
+    if (charging) {
+      const frac = Math.min(1, (now - chargeStart) / 900);
+      g.fillStyle = "rgba(0,0,0,.55)";
+      g.fillRect(W / 2 - 80, H - 96, 160, 12);
+      g.fillStyle = frac >= 1 ? "#ff5a36" : "#ffe34d";
+      g.fillRect(W / 2 - 78, H - 94, 156 * frac, 8);
+    }
+  }
 }
 
 function frame(now: number) {
@@ -1696,6 +1802,7 @@ function frame(now: number) {
   }
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   fitCamera(W, H);
+  if (fp) updateFpView(W, H);
   // La cámara acompaña la pelota hacia los costados (suave).
   const b = room.view("ball", 0);
   const target = b ? Math.max(-PAN_MAX, Math.min(PAN_MAX, b.x * 0.75)) : 0;
